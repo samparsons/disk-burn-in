@@ -1,0 +1,9 @@
+# burn-in outputs (kept outside repo by default)
+*.log
+*.bb
+burnin-logs/
+burnin-status/
+
+# local editor/OS
+.DS_Store
+*.swp
