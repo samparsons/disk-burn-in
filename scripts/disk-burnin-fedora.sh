@@ -15,6 +15,7 @@ VERSION="0.1.0"
 
 RUN=0
 DEVICE=""
+SELF_TEST=0
 LOG_DIR="${LOG_DIR:-/opt/yams/burnin-logs}"
 STATUS_DIR="${STATUS_DIR:-/opt/yams/burnin-status}"
 REPO_DIR="${REPO_DIR:-}"                 # if set, will write status into this repo and optionally commit+push
@@ -36,10 +37,12 @@ disk-burnin-fedora.sh - destructive drive burn-in with logs + optional git statu
 USAGE:
   sudo ./disk-burnin-fedora.sh --device /dev/sdX            # DRY RUN (safe)
   sudo ./disk-burnin-fedora.sh --device /dev/sdX --run      # ACTUAL RUN (DESTRUCTIVE)
+  ./disk-burnin-fedora.sh --self-test                       # NO DISK REQUIRED: tests status JSON + optional git auto-push
 
 Options:
   --device PATH          Block device (e.g. /dev/sdb). MUST be whole-disk, not a partition.
   --run                  Actually perform destructive steps (badblocks). Without this, it only prints planned actions + ETA.
+  --self-test            Run an end-to-end self-test of status generation and (if enabled) git commit+push. Does NOT touch disks.
   --no-badblocks         Skip badblocks even for HDDs (SMART-only).
   --patterns default|single
                           badblocks patterns: default=4-pass (slowest, most thorough), single=1-pass (faster, less thorough).
@@ -78,6 +81,7 @@ parse_args() {
     case "$1" in
       --device) DEVICE="${2:-}"; shift 2;;
       --run) RUN=1; shift;;
+      --self-test) SELF_TEST=1; shift;;
       --no-badblocks) BADBLOCKS=0; shift;;
       --patterns) BB_PATTERNS="${2:-}"; shift 2;;
       --log-dir) LOG_DIR="${2:-}"; shift 2;;
@@ -87,7 +91,11 @@ parse_args() {
     esac
   done
 
-  [[ -n "$DEVICE" ]] || die "--device is required"
+  if [[ "$SELF_TEST" == "1" ]]; then
+    return 0
+  fi
+
+  [[ -n "$DEVICE" ]] || die "--device is required (or use --self-test)"
   [[ -b "$DEVICE" ]] || die "Not a block device: $DEVICE"
   [[ "$DEVICE" =~ ^/dev/ ]] || die "Device must be under /dev (got: $DEVICE)"
 
@@ -303,7 +311,51 @@ run_badblocks() {
   fi
 }
 
+run_self_test() {
+  # Self-test intentionally does not require root and does not touch any disks.
+  need_cmd date
+  # python3 is optional for normal runs, but required for JSON escaping here.
+  need_cmd python3
+
+  mkdir -p "$STATUS_DIR"
+
+  local ts model serial
+  ts="$(date +%Y-%m-%d-%s)"
+  model="SELFTEST"
+  serial="$ts"
+  ID="${model}_${serial}"
+  DEVICE="(self-test)"
+  LOG_FILE="$LOG_DIR/burnin-${ID}.log"
+
+  note "SELF-TEST mode (no disks touched)"
+  note "Status dir: $STATUS_DIR"
+  if [[ -n "${REPO_DIR:-}" ]]; then
+    note "Repo dir: $REPO_DIR"
+  fi
+  if [[ "${AUTO_PUSH:-0}" == "1" ]]; then
+    note "AUTO_PUSH=1: will attempt commit+push (requires git + remote access)"
+  else
+    note "AUTO_PUSH=0: will NOT push (set AUTO_PUSH=1 to test git alerts)"
+  fi
+
+  write_status "selftest_start" "Self-test started"
+  sleep 1
+  write_status "selftest_checkpoint" "Self-test checkpoint (if you see this as a push-email, alerts are wired)"
+  sleep 1
+  write_status "selftest_complete" "Self-test completed successfully" 1
+
+  note "SELF-TEST complete. Status file:"
+  echo "  $STATUS_DIR/$ID/status.json"
+}
+
 main() {
+  parse_args "$@"
+
+  if [[ "$SELF_TEST" == "1" ]]; then
+    run_self_test
+    return 0
+  fi
+
   require_root
   need_cmd smartctl
   need_cmd lsblk
@@ -314,8 +366,7 @@ main() {
   need_cmd sed
   need_cmd grep
   need_cmd date
-
-  parse_args "$@"
+  need_cmd python3
 
   if device_has_mounts; then
     lsblk "$DEVICE" >&2 || true
