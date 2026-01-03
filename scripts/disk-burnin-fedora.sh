@@ -144,6 +144,35 @@ is_rotational() {
   [[ "$rota" == "1" ]]
 }
 
+choose_badblocks_block_size() {
+  # Some badblocks builds effectively cap the number of addressable blocks.
+  # For very large disks, small block sizes (e.g. 4096) can overflow and fail with:
+  #   "Value too large to be stored in data type"
+  #
+  # We pick the smallest power-of-two multiple of the requested BB_BLOCK_SIZE
+  # that keeps the block count under a conservative 32-bit signed max.
+  #
+  # You can still override by setting BB_BLOCK_SIZE explicitly; this function only increases it.
+  local size_bytes
+  size_bytes="$(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo 0)"
+  [[ "$size_bytes" -gt 0 ]] || { echo "$BB_BLOCK_SIZE"; return 0; }
+
+  local max_blocks=2147483647  # conservative
+  local bs="$BB_BLOCK_SIZE"
+
+  # integer ceil(size/bs) without floating point:
+  local blocks=$(( (size_bytes + bs - 1) / bs ))
+  while [[ "$blocks" -gt "$max_blocks" ]]; do
+    bs=$((bs * 2))
+    blocks=$(( (size_bytes + bs - 1) / bs ))
+    if [[ "$bs" -gt 1048576 ]]; then
+      die "Refusing: required badblocks block size exceeded 1MiB to avoid overflow. (disk too large?)"
+    fi
+  done
+
+  echo "$bs"
+}
+
 json_escape() {
   python3 - <<'PY' "$1"
 import json,sys
@@ -293,7 +322,14 @@ run_badblocks() {
   note "Running badblocks (DESTRUCTIVE): $DEVICE"
 
   local bb_file="$LOG_DIR/burnin-${ID}-$(date +%Y-%m-%d-%s).bb"
-  local bb_cmd=(badblocks -wsv -b "$BB_BLOCK_SIZE" -c "$BB_BATCH_BLOCKS" -o "$bb_file")
+  local effective_bs
+  effective_bs="$(choose_badblocks_block_size)"
+  if [[ "$effective_bs" != "$BB_BLOCK_SIZE" ]]; then
+    note "Adjusted badblocks block size from $BB_BLOCK_SIZE to $effective_bs to avoid large-disk overflow."
+    echo "Adjusted badblocks block size from $BB_BLOCK_SIZE to $effective_bs to avoid large-disk overflow." | tee -a "$LOG_FILE"
+  fi
+
+  local bb_cmd=(badblocks -wsv -b "$effective_bs" -c "$BB_BATCH_BLOCKS" -o "$bb_file")
 
   if [[ "$BB_PATTERNS" == "single" ]]; then
     # One-pass pattern (0xaa). This is faster but less thorough than default multi-pattern.
