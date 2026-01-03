@@ -157,6 +157,7 @@ write_status() {
 
   mkdir -p "$STATUS_DIR/$ID"
   local status_file="$STATUS_DIR/$ID/status.json"
+  local status_txt="$STATUS_DIR/$ID/status.txt"
 
   cat >"$status_file" <<EOF
 {
@@ -169,9 +170,17 @@ write_status() {
 }
 EOF
 
+  # Human-readable status (easy to glance at)
+  if [[ "$ok" == "1" ]]; then
+    printf '%s | OK   | %s | %s\n' "$ts" "$phase" "$msg" >"$status_txt"
+  else
+    printf '%s | FAIL | %s | %s\n' "$ts" "$phase" "$msg" >"$status_txt"
+  fi
+
   if [[ -n "${REPO_DIR:-}" ]]; then
     mkdir -p "$REPO_DIR/status/$ID"
     cp -f "$status_file" "$REPO_DIR/status/$ID/status.json"
+    cp -f "$status_txt"  "$REPO_DIR/status/$ID/status.txt"
   fi
 
   if [[ "${AUTO_PUSH:-0}" == "1" ]]; then
@@ -185,7 +194,7 @@ git_checkpoint() {
   [[ -n "${GIT_REMOTE:-}" ]] || return 0
 
   ( cd "$REPO_DIR"
-    git add "status/$ID/status.json" >/dev/null 2>&1 || true
+    git add "status/$ID/status.json" "status/$ID/status.txt" >/dev/null 2>&1 || true
     git status --porcelain | grep -q . || return 0
     git commit -m "burnin($ID): $1" >/dev/null 2>&1 || true
     git push "$GIT_REMOTE" "HEAD:$GIT_BRANCH" >/dev/null 2>&1
