@@ -1,8 +1,8 @@
 {
   "id": ""SELFTEST_2026-01-03-1767420856"",
   "device": ""(self-test)"",
-  "phase": ""selftest_start"",
+  "phase": ""selftest_checkpoint"",
   "ok": 1,
-  "message": "Self-test started",
-  "timestamp": ""2026-01-03T01:14:16-05:00""
+  "message": "Self-test checkpoint (if you see this as a push-email, alerts are wired)",
+  "timestamp": ""2026-01-03T01:14:18-05:00""
 }
