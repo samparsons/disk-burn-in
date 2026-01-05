@@ -15,6 +15,7 @@ VERSION="0.1.0"
 
 RUN=0
 DEVICE=""
+MULTI_DEVICES=""
 SELF_TEST=0
 LOG_DIR="${LOG_DIR:-/opt/yams/burnin-logs}"
 STATUS_DIR="${STATUS_DIR:-/opt/yams/burnin-status}"
@@ -37,10 +38,12 @@ disk-burnin-fedora.sh - destructive drive burn-in with logs + optional git statu
 USAGE:
   sudo ./disk-burnin-fedora.sh --device /dev/sdX            # DRY RUN (safe)
   sudo ./disk-burnin-fedora.sh --device /dev/sdX --run      # ACTUAL RUN (DESTRUCTIVE)
+  sudo ./disk-burnin-fedora.sh --multi "/dev/sdb /dev/sdc" --run # PARALLEL RUN in tmux
   ./disk-burnin-fedora.sh --self-test                       # NO DISK REQUIRED: tests status JSON + optional git auto-push
 
 Options:
   --device PATH          Block device (e.g. /dev/sdb). MUST be whole-disk, not a partition.
+  --multi "LIST"         Space-separated list of devices to test in parallel via tmux.
   --run                  Actually perform destructive steps (badblocks). Without this, it only prints planned actions + ETA.
   --self-test            Run an end-to-end self-test of status generation and (if enabled) git commit+push. Does NOT touch disks.
   --no-badblocks         Skip badblocks even for HDDs (SMART-only).
@@ -80,6 +83,7 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --device) DEVICE="${2:-}"; shift 2;;
+      --multi) MULTI_DEVICES="${2:-}"; shift 2;;
       --run) RUN=1; shift;;
       --self-test) SELF_TEST=1; shift;;
       --no-badblocks) BADBLOCKS=0; shift;;
@@ -95,7 +99,7 @@ parse_args() {
     return 0
   fi
 
-  [[ -n "$DEVICE" ]] || die "--device is required (or use --self-test)"
+  [[ -n "$DEVICE" ]] || [[ -n "$MULTI_DEVICES" ]] || die "--device or --multi is required (or use --self-test)"
   [[ -b "$DEVICE" ]] || die "Not a block device: $DEVICE"
   [[ "$DEVICE" =~ ^/dev/ ]] || die "Device must be under /dev (got: $DEVICE)"
 
@@ -223,10 +227,32 @@ git_checkpoint() {
   [[ -n "${GIT_REMOTE:-}" ]] || return 0
 
   ( cd "$REPO_DIR"
-    git add "status/$ID/status.json" "status/$ID/status.txt" >/dev/null 2>&1 || true
-    git status --porcelain | grep -q . || return 0
-    git commit -m "burnin($ID): $1" >/dev/null 2>&1 || true
-    git push "$GIT_REMOTE" "HEAD:$GIT_BRANCH" >/dev/null 2>&1
+    # Retry loop to handle multiple drives pushing to the same repo
+    local retry=0
+    local max_retries=10
+    while [ $retry -lt $max_retries ]; do
+      # Check if git is locked
+      if [ -f .git/index.lock ]; then
+        sleep $((RANDOM % 5 + 2))
+        retry=$((retry + 1))
+        continue
+      fi
+
+      git add "status/$ID/status.json" "status/$ID/status.txt" >/dev/null 2>&1 || true
+      if ! git status --porcelain | grep -q .; then
+        return 0 # Nothing to commit
+      fi
+
+      if git commit -m "burnin($ID): $1" >/dev/null 2>&1; then
+        if git push "$GIT_REMOTE" "HEAD:$GIT_BRANCH" >/dev/null 2>&1; then
+          return 0 # Success
+        fi
+      fi
+      
+      retry=$((retry + 1))
+      sleep $((RANDOM % 10 + 5))
+    done
+    note "Warning: Failed to push git checkpoint for $ID after $max_retries attempts (lock contention?)"
   )
 }
 
@@ -393,8 +419,46 @@ run_self_test() {
   echo "  $STATUS_DIR/$ID/status.json"
 }
 
+run_parallel() {
+  need_cmd tmux
+  local session="burnin_$(date +%s)"
+  note "Launching parallel tests for: $MULTI_DEVICES"
+  note "Tmux session: $session"
+
+  # Pass all existing env vars into the script
+  local env_str=""
+  [[ -n "${REPO_DIR:-}" ]] && env_str+="REPO_DIR='$REPO_DIR' "
+  [[ -n "${AUTO_PUSH:-0}" ]] && env_str+="AUTO_PUSH='$AUTO_PUSH' "
+  [[ -n "${GIT_REMOTE:-}" ]] && env_str+="GIT_REMOTE='$GIT_REMOTE' "
+  [[ -n "${GIT_BRANCH:-}" ]] && env_str+="GIT_BRANCH='$GIT_BRANCH' "
+  [[ -n "${BADBLOCKS:-1}" ]] && env_str+="BADBLOCKS='$BADBLOCKS' "
+  [[ -n "${BB_BLOCK_SIZE:-}" ]] && env_str+="BB_BLOCK_SIZE='$BB_BLOCK_SIZE' "
+
+  local first=1
+  for dev in $MULTI_DEVICES; do
+    local cmd="sudo $env_str $0 --device $dev"
+    [[ "$RUN" == "1" ]] && cmd+=" --run"
+    [[ "$BB_PATTERNS" != "default" ]] && cmd+=" --patterns $BB_PATTERNS"
+    
+    if [[ $first -eq 1 ]]; then
+      tmux new-session -d -s "$session" -n "$(basename "$dev")" "$cmd; read -p 'Press enter to close window' -r"
+      first=0
+    else
+      tmux new-window -t "$session" -n "$(basename "$dev")" "$cmd; read -p 'Press enter to close window' -r"
+    fi
+  done
+
+  note "Parallel sessions started. Attach with: tmux attach -t $session"
+  note "You can see live progress in each tmux window."
+}
+
 main() {
   parse_args "$@"
+
+  if [[ -n "$MULTI_DEVICES" ]]; then
+    run_parallel
+    return 0
+  fi
 
   if [[ "$SELF_TEST" == "1" ]]; then
     run_self_test
