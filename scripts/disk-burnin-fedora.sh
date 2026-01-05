@@ -325,23 +325,79 @@ smart_run_and_wait() {
   write_status "smart_${test}_start" "Starting SMART ${label} test"
   note "Starting SMART ${label} test: smartctl -t $test $DEVICE"
 
-  smartctl -t "$test" "$DEVICE" | tee -a "$LOG_FILE" >/dev/null || true
+  # Start test and capture output so we can detect "can't start" conditions.
+  local start_out
+  start_out="$(smartctl -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
+  if echo "$start_out" | grep -qi "Can't start self-test without aborting current test"; then
+    write_status "smart_${test}_failed" "SMART ${label} could not start (another test already running)" 0
+    die "SMART ${label} could not start because another test is running. Abort with: smartctl -X $DEVICE, then retry."
+  fi
 
-  # Poll until it finishes (best-effort). Some USB bridges don't provide progress.
+  # Poll until it finishes. For long tests we must be fail-closed: do not proceed unless completion is confirmed.
   local max_wait=$((60*60*72)) # 72h cap
   local waited=0
+  local poll_interval=300 # 5 minutes
+  local last_progress=""
+
+  local test_pattern=""
+  case "$test" in
+    short) test_pattern="Short offline";;
+    long|extended) test_pattern="Extended offline";;
+    conveyance) test_pattern="Conveyance";;
+  esac
+
   while [[ "$waited" -lt "$max_wait" ]]; do
-    local out
-    out="$(smartctl -c "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
-    echo "$out" >>"$LOG_FILE"
-    if echo "$out" | grep -qiE "Self-test execution status:[[:space:]]*\\(.*\\)[[:space:]]*Self-test routine in progress"; then
-      sleep 300
-      waited=$((waited + 300))
+    local status_out selftest_log test_result
+
+    status_out="$(smartctl -c "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
+    [[ -n "$status_out" ]] && echo "$status_out" >>"$LOG_FILE"
+
+    selftest_log="$(smartctl -l selftest "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
+    [[ -n "$selftest_log" ]] && echo "$selftest_log" >>"$LOG_FILE"
+
+    # If we can't read the selftest log (USB/SAT hiccup), keep waiting; don't proceed to badblocks.
+    if [[ -z "$selftest_log" ]]; then
+      note "WARNING: smartctl -l selftest returned empty; retrying..."
+      sleep "$poll_interval"
+      waited=$((waited + poll_interval))
       continue
     fi
-    # If it doesn't claim "in progress", assume finished.
-    break
+
+    test_result="$(echo "$selftest_log" | grep -i "$test_pattern" | head -1 || true)"
+
+    # Completed
+    if echo "$test_result" | grep -qi "Completed without error"; then
+      break
+    fi
+
+    # In progress (prefer selftest log; use -c output only for progress percentage)
+    if echo "$test_result" | grep -qi "Self-test routine in progress"; then
+      local progress
+      progress="$(echo "$status_out" | grep -oE "[0-9]+% of test remaining" | head -1 || true)"
+      if [[ -n "$progress" ]] && [[ "$progress" != "$last_progress" ]]; then
+        note "SMART ${label} test progress: $progress"
+        last_progress="$progress"
+      fi
+      sleep "$poll_interval"
+      waited=$((waited + poll_interval))
+      continue
+    fi
+
+    # Aborted/failed (do NOT proceed)
+    if echo "$test_result" | grep -qiE "Aborted|Interrupted|Fatal|error"; then
+      write_status "smart_${test}_failed" "SMART ${label} test aborted/failed: $test_result" 0
+      die "SMART ${label} test aborted/failed: $test_result"
+    fi
+
+    # Unknown state, keep waiting.
+    sleep "$poll_interval"
+    waited=$((waited + poll_interval))
   done
+
+  if [[ "$waited" -ge "$max_wait" ]]; then
+    write_status "smart_${test}_failed" "SMART ${label} timed out after ${max_wait}s" 0
+    die "SMART ${label} timed out after ${max_wait}s"
+  fi
 
   smartctl -a "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
   write_status "smart_${test}_done" "SMART ${label} test completed"
