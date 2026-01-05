@@ -17,6 +17,7 @@ RUN=0
 DEVICE=""
 MULTI_DEVICES=""
 SELF_TEST=0
+DEV_TAG=""
 LOG_DIR="${LOG_DIR:-/opt/yams/burnin-logs}"
 STATUS_DIR="${STATUS_DIR:-/opt/yams/burnin-status}"
 REPO_DIR="${REPO_DIR:-}"                 # if set, will write status into this repo and optionally commit+push
@@ -407,7 +408,7 @@ run_badblocks() {
   write_status "badblocks_start" "Starting badblocks destructive test (THIS ERASES DATA)"
   note "Running badblocks (DESTRUCTIVE): $DEVICE"
 
-  local bb_file="$LOG_DIR/burnin-${ID}-$(date +%Y-%m-%d-%s).bb"
+  local bb_file="$LOG_DIR/burnin-${DEV_TAG}-${ID}-$(date +%Y-%m-%d-%s).bb"
   local effective_bs
   effective_bs="$(choose_badblocks_block_size)"
   if [[ "$effective_bs" != "$BB_BLOCK_SIZE" ]]; then
@@ -456,6 +457,7 @@ run_self_test() {
   serial="$ts"
   ID="${model}_${serial}"
   DEVICE="(self-test)"
+  DEV_TAG="selftest"
   LOG_FILE="$LOG_DIR/burnin-${ID}.log"
 
   note "SELF-TEST mode (no disks touched)"
@@ -557,7 +559,10 @@ main() {
 
   read -r MODEL SERIAL < <(get_model_serial)
   ID="${MODEL}_${SERIAL}"
-  LOG_FILE="$LOG_DIR/burnin-${ID}-$(date +%Y-%m-%d-%s).log"
+  DEV_TAG="$(basename "$DEVICE")"
+  DEV_TAG="$(echo "$DEV_TAG" | tr -cd 'A-Za-z0-9._-')"
+  [[ -n "$DEV_TAG" ]] || DEV_TAG="dev"
+  LOG_FILE="$LOG_DIR/burnin-${DEV_TAG}-${ID}-$(date +%Y-%m-%d-%s).log"
 
   note "Device: $DEVICE"
   note "Model/Serial: $MODEL / $SERIAL"
