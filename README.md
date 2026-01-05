@@ -15,8 +15,12 @@ This repo adds a Fedora-friendly burn-in script for testing new HDDs (e.g. 28TB)
 - SMART short + long again after `badblocks`
 
 It writes:
-- A detailed per-drive log under `/opt/yams/burnin-logs/`
-- A machine-readable status JSON under `/opt/yams/burnin-status/<MODEL>_<SERIAL>/status.json`
+- A detailed per-drive log under `/opt/yams/scripts/disk-burn-in/run-logs/`
+- A machine-readable status JSON under `/opt/yams/scripts/disk-burn-in/run-status/<MODEL>_<SERIAL>/status.json`
+
+If you enable git auto-push (`REPO_DIR` + `AUTO_PUSH=1`), it additionally mirrors status into:
+- `/opt/yams/scripts/disk-burn-in/status/<MODEL>_<SERIAL>/status.json`
+so it can be committed and pushed for GitHub “push email” notifications.
 
 ## Quick start (safe dry-run)
 
@@ -29,7 +33,7 @@ lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,ROTA,MOUNTPOINT
 2) Dry run (prints ETA + planned steps):
 
 ```bash
-sudo /opt/yams/scripts/disk-burnin-fedora.sh --device /dev/sdX
+sudo /opt/yams/scripts/disk-burn-in/scripts/disk-burnin-fedora.sh --device /dev/sdX --plan
 ```
 
 Self-test (no disk required; good for validating git auto-push alerts):
@@ -46,7 +50,7 @@ export GIT_BRANCH=main
 3) Real run (DESTRUCTIVE):
 
 ```bash
-sudo /opt/yams/scripts/disk-burnin-fedora.sh --device /dev/sdX --run
+sudo /opt/yams/scripts/disk-burn-in/scripts/disk-burnin-fedora.sh --device /dev/sdX --run
 ```
 
 ## Fast vs thorough
@@ -57,13 +61,13 @@ Default is **thorough**:
 To reduce time at the cost of coverage:
 
 ```bash
-sudo /opt/yams/scripts/disk-burnin-fedora.sh --device /dev/sdX --run --patterns single
+sudo /opt/yams/scripts/disk-burn-in/scripts/disk-burnin-fedora.sh --device /dev/sdX --run --patterns single
 ```
 
 To skip badblocks entirely (SMART-only):
 
 ```bash
-sudo /opt/yams/scripts/disk-burnin-fedora.sh --device /dev/sdX --run --no-badblocks
+sudo /opt/yams/scripts/disk-burn-in/scripts/disk-burnin-fedora.sh --device /dev/sdX --run --no-badblocks
 ```
 
 ## GitHub “push email” notifications (auto-push)

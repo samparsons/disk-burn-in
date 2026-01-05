@@ -77,8 +77,9 @@ SAFETY:
   - Refuses to run if the device has mounted partitions.
 
 STATUS OUTPUT:
-  Writes status JSON to: /opt/yams/burnin-status/<model>_<serial>/status.json
-  If REPO_DIR is set, also mirrors into <repo>/status/<model>_<serial>/status.json for easy git pushing.
+  Writes logs to: <repo>/run-logs/
+  Writes machine-readable status JSON to: <repo>/run-status/<model>_<serial>/status.json
+  If REPO_DIR is set, also mirrors into: <repo>/status/<model>_<serial>/status.json for easy git commit+push notifications.
 EOF
 }
 
@@ -578,6 +579,7 @@ run_parallel() {
   fi
 
   local session="burnin_$(date +%s)"
+  local epoch="${session#burnin_}"
   note "Launching parallel tests for: $MULTI_DEVICES"
   note "Tmux session: $session"
 
@@ -601,18 +603,25 @@ run_parallel() {
   [[ -n "${BADBLOCKS:-1}" ]] && env_str+="BADBLOCKS='$BADBLOCKS' "
   [[ -n "${BB_BLOCK_SIZE:-}" ]] && env_str+="BB_BLOCK_SIZE='$BB_BLOCK_SIZE' "
 
+  # Use an absolute script path so tmux windows keep working even if cwd changes.
+  local script_path
+  script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
   local first=1
   for dev in $MULTI_DEVICES; do
-    local cmd="sudo BURNIN_SESSION='$session' $env_str $0 --device $dev"
+    local win_name
+    win_name="$(basename "$dev")@$epoch"
+
+    local cmd="BURNIN_SESSION='$session' $env_str '$script_path' --device '$dev'"
     [[ "${ABORT_SMART:-0}" == "1" ]] && cmd+=" --abort-smart"
     [[ "$RUN" == "1" ]] && cmd+=" --run"
     [[ "$BB_PATTERNS" != "default" ]] && cmd+=" --patterns $BB_PATTERNS"
 
     if [[ $first -eq 1 ]]; then
-      tmux new-session -d -s "$session" -n "$(basename "$dev")" "$cmd; read -p 'Press enter to close window' -r"
+      tmux new-session -d -s "$session" -n "$win_name" "$cmd; read -p 'Press enter to close window' -r"
       first=0
     else
-      tmux new-window -t "$session" -n "$(basename "$dev")" "$cmd; read -p 'Press enter to close window' -r"
+      tmux new-window -t "$session" -n "$win_name" "$cmd; read -p 'Press enter to close window' -r"
     fi
   done
 
