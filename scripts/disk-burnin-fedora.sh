@@ -82,13 +82,15 @@ STATUS OUTPUT:
 EOF
 }
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-note() { echo "==> $*"; }
+ts() { date -Is; }
+
+die() { echo "$(ts) ERROR: $*" >&2; exit 1; }
+note() { echo "$(ts) ==> $*"; }
 
 log_note() {
   # Like note(), but also append to LOG_FILE when available (helps debugging failures).
   if [[ -n "${LOG_FILE:-}" ]]; then
-    echo "==> $*" | tee -a "$LOG_FILE"
+    echo "$(ts) ==> $*" | tee -a "$LOG_FILE"
   else
     note "$@"
   fi
