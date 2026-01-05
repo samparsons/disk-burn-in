@@ -96,4 +96,11 @@ With a single USB dock, CPU is rarely the bottleneck. The limiting factors are:
 - USB/SATA bridge and port
 - how many full-disk passes you choose (badblocks multi-pass can take **many days**)
 
+## Notes on USB stability (important)
+
+Some USB/SATA bridges are flaky during SMART long tests. Two practical tips:
+
+- Avoid running `smartctl` in a tight loop (e.g., every 10s) while a long test is running; frequent SMART queries can stress some bridges and correlate with “Aborted by host”.
+- Prefer checking SMART progress infrequently (e.g., every 30–60 minutes), and rely on the script’s built-in polling (it already polls long tests slowly on USB).
+
 
