@@ -35,8 +35,8 @@ sudo /opt/yams/scripts/disk-burnin-fedora.sh --device /dev/sdX
 Self-test (no disk required; good for validating git auto-push alerts):
 
 ```bash
-cd /opt/yams/disk-burn-in
-export REPO_DIR=/opt/yams/disk-burn-in
+cd /opt/yams/scripts/disk-burn-in
+export REPO_DIR=/opt/yams/scripts/disk-burn-in
 export AUTO_PUSH=1
 export GIT_REMOTE=origin
 export GIT_BRANCH=main
