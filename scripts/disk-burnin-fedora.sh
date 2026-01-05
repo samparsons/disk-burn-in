@@ -519,7 +519,7 @@ run_parallel() {
     fi
   done
 
-  note "Parallel sessions started. Attach with: tmux attach -t $session"
+  note "Parallel sessions started. Attach with: sudo tmux attach -t $session"
   note "You can see live progress in each tmux window."
 }
 
