@@ -89,7 +89,37 @@ EOF
 
 ts() { date -Is; }
 
-die() { echo "$(ts) ERROR: $*" >&2; exit 1; }
+STATUS_WRITTEN=0
+LAST_STATUS_OK=1
+LAST_STATUS_PHASE=""
+
+emit_failure_context() {
+  # If we have a log file, capture a small tail for debugging + push-email context.
+  # This is intentionally small so it stays readable in git.
+  local tail_lines="${LOG_TAIL_LINES:-200}"
+  [[ -n "${ID:-}" ]] || return 0
+  [[ -n "${LOG_FILE:-}" ]] || return 0
+  [[ -f "${LOG_FILE:-}" ]] || return 0
+
+  local tail_file="$STATUS_DIR/$ID/log-tail.txt"
+  {
+    echo "Log: $LOG_FILE"
+    echo "Generated: $(date -Is)"
+    echo
+    echo "===== last ${tail_lines} lines ====="
+    tail -n "$tail_lines" "$LOG_FILE" 2>/dev/null || true
+  } >"$tail_file" 2>/dev/null || true
+
+  if [[ -n "${REPO_DIR:-}" ]]; then
+    mkdir -p "$REPO_DIR/status/$ID"
+    cp -f "$tail_file" "$REPO_DIR/status/$ID/log-tail.txt" 2>/dev/null || true
+  fi
+}
+
+die() {
+  echo "$(ts) ERROR: $*" >&2
+  exit 1
+}
 note() { echo "$(ts) ==> $*"; }
 
 log_note() {
@@ -285,6 +315,10 @@ EOF
     printf '%s | FAIL | %s | %s\n' "$ts" "$phase" "$msg" >"$status_txt"
   fi
 
+  STATUS_WRITTEN=1
+  LAST_STATUS_OK="$ok"
+  LAST_STATUS_PHASE="$phase"
+
   if [[ -n "${REPO_DIR:-}" ]]; then
     mkdir -p "$REPO_DIR/status/$ID"
     cp -f "$status_file" "$REPO_DIR/status/$ID/status.json"
@@ -292,6 +326,9 @@ EOF
   fi
 
   if [[ "${AUTO_PUSH:-0}" == "1" ]]; then
+    if [[ "$ok" != "1" ]]; then
+      emit_failure_context || true
+    fi
     git_checkpoint "$phase" "$msg" || true
   fi
 }
@@ -314,6 +351,8 @@ git_checkpoint() {
       fi
 
       git add "status/$ID/status.json" "status/$ID/status.txt" >/dev/null 2>&1 || true
+      # Optional failure context (only exists on failures)
+      git add "status/$ID/log-tail.txt" >/dev/null 2>&1 || true
       if ! git status --porcelain | grep -q .; then
         return 0 # Nothing to commit
       fi
@@ -330,6 +369,22 @@ git_checkpoint() {
     note "Warning: Failed to push git checkpoint for $ID after $max_retries attempts (lock contention?)"
   )
 }
+
+on_exit() {
+  local rc=$?
+  # Don't try to write status for help/self-test/multi-only invocations.
+  if [[ "$rc" -ne 0 ]] && [[ "${PLAN:-0}" != "1" ]] && [[ "${SELF_TEST:-0}" != "1" ]] && [[ -z "${MULTI_DEVICES:-}" ]]; then
+    # If we have enough context to write status and haven't already recorded a failure, do so.
+    if [[ -n "${ID:-}" ]] && [[ "$STATUS_WRITTEN" -eq 0 || "$LAST_STATUS_OK" -eq 1 ]]; then
+      # Avoid recursion if STATUS_DIR isn't set for some reason
+      if [[ -n "${STATUS_DIR:-}" ]]; then
+        write_status "fatal_exit" "Script exited with code $rc" 0 || true
+      fi
+    fi
+  fi
+}
+
+trap on_exit EXIT
 
 estimate_eta() {
   # Estimate total time based on:
