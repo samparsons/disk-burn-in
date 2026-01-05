@@ -701,18 +701,20 @@ main() {
   [[ -n "$DEV_TAG" ]] || DEV_TAG="dev"
   LOG_FILE="$LOG_DIR/burnin-${DEV_TAG}-${ID}-$(date +%Y-%m-%d-%s).log"
 
-  note "Device: $DEVICE"
-  note "Model/Serial: $MODEL / $SERIAL"
+  # Use log_note() so these always land in the per-drive log file, even if the tmux
+  # window output scrollback differs between drives.
+  log_note "Device: $DEVICE"
+  log_note "Model/Serial: $MODEL / $SERIAL"
   if [[ -n "${BURNIN_SESSION:-}" ]]; then
-    note "Tmux session: $BURNIN_SESSION"
+    log_note "Tmux session: $BURNIN_SESSION"
   fi
-  note "Log: $LOG_FILE"
-  note "Status: $STATUS_DIR/$ID/status.json"
+  log_note "Log: $LOG_FILE"
+  log_note "Status: $STATUS_DIR/$ID/status.json"
   if [[ "$RUN" != "1" ]]; then
-    note "Mode: SMART-only (non-destructive). SMART tests will run; badblocks will NOT run unless you add --run."
-    note "If you want plan-only (no SMART tests), add --plan."
+    log_note "Mode: SMART-only (non-destructive). SMART tests will run; badblocks will NOT run unless you add --run."
+    log_note "If you want plan-only (no SMART tests), add --plan."
   else
-    note "Mode: RUN (DESTRUCTIVE). Data on $DEVICE WILL be erased."
+    log_note "Mode: RUN (DESTRUCTIVE). Data on $DEVICE WILL be erased."
   fi
 
   smartctl "${SMARTCTL_ARGS[@]}" -i "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
