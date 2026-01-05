@@ -18,6 +18,7 @@ PLAN=0
 ABORT_SMART=0
 DEVICE=""
 MULTI_DEVICES=""
+TMUX_SESSION=""
 SELF_TEST=0
 DEV_TAG=""
 
@@ -51,11 +52,14 @@ USAGE:
   sudo ./disk-burnin-fedora.sh --device /dev/sdX            # SMART-ONLY (non-destructive)
   sudo ./disk-burnin-fedora.sh --device /dev/sdX --run      # FULL RUN (DESTRUCTIVE: includes badblocks)
   sudo ./disk-burnin-fedora.sh --multi "/dev/sdb /dev/sdc" --run # PARALLEL RUN in tmux
+  sudo ./disk-burnin-fedora.sh --tmux-session burnin_1234567890 --device /dev/sdb --abort-smart --run
+                               # Run a SINGLE device job inside an existing tmux session (creates a new window)
   ./disk-burnin-fedora.sh --self-test                       # NO DISK REQUIRED: tests status JSON + optional git auto-push
 
 Options:
   --device PATH          Block device (e.g. /dev/sdb). MUST be whole-disk, not a partition.
   --multi "LIST"         Space-separated list of devices to test in parallel via tmux.
+  --tmux-session NAME    Create a new tmux window in existing session NAME and run the per-device job there.
   --plan                 Print plan/ETA only. Does NOT start SMART tests and does NOT run badblocks.
   --abort-smart          If a SMART self-test is already running, abort it first (smartctl -X) then proceed.
   --run                  Actually perform destructive steps (badblocks). Without this, it only prints planned actions + ETA.
@@ -137,6 +141,7 @@ parse_args() {
     case "$1" in
       --device) DEVICE="${2:-}"; shift 2;;
       --multi) MULTI_DEVICES="${2:-}"; shift 2;;
+      --tmux-session) TMUX_SESSION="${2:-}"; shift 2;;
       --plan) PLAN=1; shift;;
       --abort-smart) ABORT_SMART=1; shift;;
       --run) RUN=1; shift;;
@@ -154,7 +159,15 @@ parse_args() {
     return 0
   fi
 
+  if [[ -n "${TMUX_SESSION:-}" ]] && [[ -n "${MULTI_DEVICES:-}" ]]; then
+    die "Use either --multi (creates a new tmux session) OR --tmux-session (targets an existing session), not both."
+  fi
+
   [[ -n "$DEVICE" ]] || [[ -n "$MULTI_DEVICES" ]] || die "--device or --multi is required (or use --self-test)"
+
+  if [[ -n "${TMUX_SESSION:-}" ]] && [[ -z "${DEVICE:-}" ]]; then
+    die "--tmux-session requires --device"
+  fi
   
   # Only validate DEVICE if it's set (not using --multi)
   if [[ -n "$DEVICE" ]]; then
@@ -629,6 +642,47 @@ run_parallel() {
   note "You can see live progress in each tmux window."
 }
 
+run_in_existing_tmux_session() {
+  require_root
+  need_cmd tmux
+
+  tmux has-session -t "$TMUX_SESSION" 2>/dev/null || die "tmux session not found: $TMUX_SESSION"
+
+  local session="$TMUX_SESSION"
+  local epoch
+  if [[ "$session" =~ ^burnin_[0-9]+$ ]]; then
+    epoch="${session#burnin_}"
+  else
+    epoch="$(date +%s)"
+  fi
+
+  # Pass env vars into the script (same behavior as run_parallel)
+  local env_str=""
+  [[ -n "${REPO_DIR:-}" ]] && env_str+="REPO_DIR='$REPO_DIR' "
+  [[ -n "${AUTO_PUSH:-0}" ]] && env_str+="AUTO_PUSH='$AUTO_PUSH' "
+  [[ -n "${GIT_REMOTE:-}" ]] && env_str+="GIT_REMOTE='$GIT_REMOTE' "
+  [[ -n "${GIT_BRANCH:-}" ]] && env_str+="GIT_BRANCH='$GIT_BRANCH' "
+  [[ -n "${BADBLOCKS:-1}" ]] && env_str+="BADBLOCKS='$BADBLOCKS' "
+  [[ -n "${BB_BLOCK_SIZE:-}" ]] && env_str+="BB_BLOCK_SIZE='$BB_BLOCK_SIZE' "
+
+  local script_path
+  script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+  local win_name
+  win_name="$(basename "$DEVICE")@$epoch"
+
+  # Important: do NOT include --tmux-session in the spawned command (avoid recursion).
+  local cmd="BURNIN_SESSION='$session' $env_str '$script_path' --device '$DEVICE'"
+  [[ "${ABORT_SMART:-0}" == "1" ]] && cmd+=" --abort-smart"
+  [[ "$RUN" == "1" ]] && cmd+=" --run"
+  [[ "${PLAN:-0}" == "1" ]] && cmd+=" --plan"
+  [[ "$BB_PATTERNS" != "default" ]] && cmd+=" --patterns $BB_PATTERNS"
+
+  note "Creating tmux window '$win_name' in session: $session"
+  tmux new-window -t "$session" -n "$win_name" "$cmd; read -p 'Press enter to close window' -r"
+  note "Done. Attach with: sudo tmux attach -t $session"
+}
+
 main() {
   parse_args "$@"
 
@@ -639,6 +693,11 @@ main() {
 
   if [[ "$SELF_TEST" == "1" ]]; then
     run_self_test
+    return 0
+  fi
+
+  if [[ -n "${TMUX_SESSION:-}" ]]; then
+    run_in_existing_tmux_session
     return 0
   fi
 
