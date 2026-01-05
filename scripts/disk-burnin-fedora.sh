@@ -603,7 +603,7 @@ run_parallel() {
 
   local first=1
   for dev in $MULTI_DEVICES; do
-    local cmd="sudo $env_str $0 --device $dev"
+    local cmd="sudo BURNIN_SESSION='$session' $env_str $0 --device $dev"
     [[ "${ABORT_SMART:-0}" == "1" ]] && cmd+=" --abort-smart"
     [[ "$RUN" == "1" ]] && cmd+=" --run"
     [[ "$BB_PATTERNS" != "default" ]] && cmd+=" --patterns $BB_PATTERNS"
@@ -694,6 +694,9 @@ main() {
 
   note "Device: $DEVICE"
   note "Model/Serial: $MODEL / $SERIAL"
+  if [[ -n "${BURNIN_SESSION:-}" ]]; then
+    note "Tmux session: $BURNIN_SESSION"
+  fi
   note "Log: $LOG_FILE"
   note "Status: $STATUS_DIR/$ID/status.json"
   if [[ "$RUN" != "1" ]]; then
