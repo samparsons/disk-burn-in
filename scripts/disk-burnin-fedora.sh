@@ -20,8 +20,16 @@ DEVICE=""
 MULTI_DEVICES=""
 SELF_TEST=0
 DEV_TAG=""
-LOG_DIR="${LOG_DIR:-/opt/yams/burnin-logs}"
-STATUS_DIR="${STATUS_DIR:-/opt/yams/burnin-status}"
+
+# Default output locations live under the burn-in repo root to avoid cluttering /opt/yams/.
+# Repo layout (default):
+#   /opt/yams/scripts/disk-burn-in/
+#     run-logs/
+#     run-status/
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+LOG_DIR="${LOG_DIR:-$REPO_ROOT/run-logs}"
+STATUS_DIR="${STATUS_DIR:-$REPO_ROOT/run-status}"
 REPO_DIR="${REPO_DIR:-}"                 # if set, will write status into this repo and optionally commit+push
 GIT_REMOTE="${GIT_REMOTE:-}"             # e.g. github.com-yams-burnin:<you>/<repo>.git (via ssh config alias) OR full git@ url
 GIT_BRANCH="${GIT_BRANCH:-main}"
@@ -55,7 +63,7 @@ Options:
   --no-badblocks         Skip badblocks even for HDDs (SMART-only).
   --patterns default|single
                           badblocks patterns: default=4-pass (slowest, most thorough), single=1-pass (faster, less thorough).
-  --log-dir DIR          Log output directory (default: /opt/yams/burnin-logs)
+  --log-dir DIR          Log output directory (default: <repo>/run-logs)
   --repo-dir DIR         If set, write status files into this git repo folder (for push-email notifications).
 
 Environment variables (optional):
@@ -77,12 +85,48 @@ EOF
 die() { echo "ERROR: $*" >&2; exit 1; }
 note() { echo "==> $*"; }
 
+log_note() {
+  # Like note(), but also append to LOG_FILE when available (helps debugging failures).
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    echo "==> $*" | tee -a "$LOG_FILE"
+  else
+    note "$@"
+  fi
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
 require_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Must run as root (use sudo)."
+}
+
+SMARTCTL_ARGS=()
+
+detect_smartctl_args() {
+  # Use smartctl's own scan output to choose the right -d TYPE for this device (e.g. -d sat).
+  # Example: /dev/sda -d sat # /dev/sda [SAT], ATA device
+  local line args
+  line="$(smartctl --scan-open 2>/dev/null | awk -v dev="$DEVICE" '$1==dev {print; exit}')" || true
+  if [[ -n "$line" ]]; then
+    args="$(echo "$line" | awk '{
+      for (i=2; i<=NF; i++) {
+        if ($i=="#") break;
+        printf "%s%s", (i==2?"":" "), $i
+      }
+    }')"
+    if [[ -n "$args" ]]; then
+      # shellcheck disable=SC2206
+      SMARTCTL_ARGS=($args)
+      return 0
+    fi
+  fi
+  SMARTCTL_ARGS=()
+}
+
+is_usb_transport() {
+  [[ "$(lsblk -dn -o TRAN "$DEVICE" 2>/dev/null | head -n1 || true)" == "usb" ]]
 }
 
 parse_args() {
@@ -139,7 +183,7 @@ get_smart_field() {
   if [[ "${PLAN:-0}" == "1" ]]; then
     return 0
   fi
-  smartctl -i "$DEVICE" 2>/dev/null | sed -n "s/.*$re[[:space:]]*:[[:space:]]*//p" | head -n 1
+  smartctl "${SMARTCTL_ARGS[@]}" -i "$DEVICE" 2>/dev/null | sed -n "s/.*$re[[:space:]]*:[[:space:]]*//p" | head -n 1
 }
 
 get_model_serial() {
@@ -340,23 +384,23 @@ estimate_eta() {
 smart_run_and_wait() {
   local test="$1" label="$2"
   write_status "smart_${test}_start" "Starting SMART ${label} test"
-  note "Starting SMART ${label} test: smartctl -t $test $DEVICE"
+  log_note "Starting SMART ${label} test: smartctl ${SMARTCTL_ARGS[*]} -t $test $DEVICE"
 
   if [[ "${ABORT_SMART:-0}" == "1" ]]; then
-    note "ABORT_SMART=1: aborting any in-progress SMART self-test before starting (${label})"
-    smartctl -X "$DEVICE" >/dev/null 2>&1 || true
+    log_note "ABORT_SMART=1: aborting any in-progress SMART self-test before starting (${label})"
+    smartctl "${SMARTCTL_ARGS[@]}" -X "$DEVICE" >/dev/null 2>&1 || true
     sleep 2
   fi
 
   # Start test and capture output so we can detect "can't start" conditions.
   local start_out
-  start_out="$(smartctl -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
+  start_out="$(smartctl "${SMARTCTL_ARGS[@]}" -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
   if echo "$start_out" | grep -qi "Can't start self-test without aborting current test"; then
     if [[ "${ABORT_SMART:-0}" == "1" ]]; then
-      note "A SMART test is already running; aborting and retrying start once..."
-      smartctl -X "$DEVICE" >/dev/null 2>&1 || true
+      log_note "A SMART test is already running; aborting and retrying start once..."
+      smartctl "${SMARTCTL_ARGS[@]}" -X "$DEVICE" >/dev/null 2>&1 || true
       sleep 2
-      start_out="$(smartctl -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
+      start_out="$(smartctl "${SMARTCTL_ARGS[@]}" -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
     fi
     if echo "$start_out" | grep -qi "Can't start self-test without aborting current test"; then
       write_status "smart_${test}_failed" "SMART ${label} could not start (another test already running)" 0
@@ -368,6 +412,7 @@ smart_run_and_wait() {
   local max_wait=$((60*60*72)) # 72h cap
   local waited=0
   local poll_interval=300 # 5 minutes
+  local initial_grace=60  # avoid immediate polling; some USB bridges behave badly under SMART queries
   local last_progress=""
 
   local test_pattern=""
@@ -377,18 +422,26 @@ smart_run_and_wait() {
     conveyance) test_pattern="Conveyance";;
   esac
 
+  # Long tests on USB are especially sensitive; poll less frequently.
+  if is_usb_transport && [[ "$test" != "short" ]]; then
+    poll_interval=1800
+  fi
+
+  sleep "$initial_grace"
+  waited=$((waited + initial_grace))
+
   while [[ "$waited" -lt "$max_wait" ]]; do
     local status_out selftest_log test_result
 
-    status_out="$(smartctl -c "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
+    status_out="$(smartctl "${SMARTCTL_ARGS[@]}" -c "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
     [[ -n "$status_out" ]] && echo "$status_out" >>"$LOG_FILE"
 
-    selftest_log="$(smartctl -l selftest "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
+    selftest_log="$(smartctl "${SMARTCTL_ARGS[@]}" -l selftest "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
     [[ -n "$selftest_log" ]] && echo "$selftest_log" >>"$LOG_FILE"
 
     # If we can't read the selftest log (USB/SAT hiccup), keep waiting; don't proceed to badblocks.
     if [[ -z "$selftest_log" ]]; then
-      note "WARNING: smartctl -l selftest returned empty; retrying..."
+      log_note "WARNING: smartctl -l selftest returned empty; retrying..."
       sleep "$poll_interval"
       waited=$((waited + poll_interval))
       continue
@@ -406,7 +459,7 @@ smart_run_and_wait() {
       local progress
       progress="$(echo "$status_out" | grep -oE "[0-9]+% of test remaining" | head -1 || true)"
       if [[ -n "$progress" ]] && [[ "$progress" != "$last_progress" ]]; then
-        note "SMART ${label} test progress: $progress"
+        log_note "SMART ${label} test progress: $progress"
         last_progress="$progress"
       fi
       sleep "$poll_interval"
@@ -430,7 +483,7 @@ smart_run_and_wait() {
     die "SMART ${label} timed out after ${max_wait}s"
   fi
 
-  smartctl -a "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
+  smartctl "${SMARTCTL_ARGS[@]}" -a "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
   write_status "smart_${test}_done" "SMART ${label} test completed"
 }
 
@@ -628,6 +681,8 @@ main() {
 
   mkdir -p "$LOG_DIR" "$STATUS_DIR"
 
+  detect_smartctl_args
+
   read -r MODEL SERIAL < <(get_model_serial)
   ID="${MODEL}_${SERIAL}"
   DEV_TAG="$(basename "$DEVICE")"
@@ -646,8 +701,8 @@ main() {
     note "Mode: RUN (DESTRUCTIVE). Data on $DEVICE WILL be erased."
   fi
 
-  smartctl -i "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
-  smartctl -a "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
+  smartctl "${SMARTCTL_ARGS[@]}" -i "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
+  smartctl "${SMARTCTL_ARGS[@]}" -a "$DEVICE" 2>/dev/null | tee -a "$LOG_FILE" >/dev/null || true
 
   note "ETA estimation (rough):"
   estimate_eta | tee -a "$LOG_FILE"

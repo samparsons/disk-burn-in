@@ -3,6 +3,8 @@
 *.bb
 burnin-logs/
 burnin-status/
+run-logs/
+run-status/
 
 # local editor/OS
 .DS_Store
