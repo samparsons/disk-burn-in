@@ -14,6 +14,8 @@ set -euo pipefail
 VERSION="0.1.0"
 
 RUN=0
+PLAN=0
+ABORT_SMART=0
 DEVICE=""
 MULTI_DEVICES=""
 SELF_TEST=0
@@ -37,14 +39,17 @@ usage() {
 disk-burnin-fedora.sh - destructive drive burn-in with logs + optional git status pushes
 
 USAGE:
-  sudo ./disk-burnin-fedora.sh --device /dev/sdX            # DRY RUN (safe)
-  sudo ./disk-burnin-fedora.sh --device /dev/sdX --run      # ACTUAL RUN (DESTRUCTIVE)
+  sudo ./disk-burnin-fedora.sh --device /dev/sdX --plan     # PLAN ONLY (no SMART, no badblocks; safe)
+  sudo ./disk-burnin-fedora.sh --device /dev/sdX            # SMART-ONLY (non-destructive)
+  sudo ./disk-burnin-fedora.sh --device /dev/sdX --run      # FULL RUN (DESTRUCTIVE: includes badblocks)
   sudo ./disk-burnin-fedora.sh --multi "/dev/sdb /dev/sdc" --run # PARALLEL RUN in tmux
   ./disk-burnin-fedora.sh --self-test                       # NO DISK REQUIRED: tests status JSON + optional git auto-push
 
 Options:
   --device PATH          Block device (e.g. /dev/sdb). MUST be whole-disk, not a partition.
   --multi "LIST"         Space-separated list of devices to test in parallel via tmux.
+  --plan                 Print plan/ETA only. Does NOT start SMART tests and does NOT run badblocks.
+  --abort-smart          If a SMART self-test is already running, abort it first (smartctl -X) then proceed.
   --run                  Actually perform destructive steps (badblocks). Without this, it only prints planned actions + ETA.
   --self-test            Run an end-to-end self-test of status generation and (if enabled) git commit+push. Does NOT touch disks.
   --no-badblocks         Skip badblocks even for HDDs (SMART-only).
@@ -85,6 +90,8 @@ parse_args() {
     case "$1" in
       --device) DEVICE="${2:-}"; shift 2;;
       --multi) MULTI_DEVICES="${2:-}"; shift 2;;
+      --plan) PLAN=1; shift;;
+      --abort-smart) ABORT_SMART=1; shift;;
       --run) RUN=1; shift;;
       --self-test) SELF_TEST=1; shift;;
       --no-badblocks) BADBLOCKS=0; shift;;
@@ -129,6 +136,9 @@ device_has_mounts() {
 get_smart_field() {
   # $1 = regex (first match), prints value after colon
   local re="$1"
+  if [[ "${PLAN:-0}" == "1" ]]; then
+    return 0
+  fi
   smartctl -i "$DEVICE" 2>/dev/null | sed -n "s/.*$re[[:space:]]*:[[:space:]]*//p" | head -n 1
 }
 
@@ -199,12 +209,12 @@ write_status() {
 
   cat >"$status_file" <<EOF
 {
-  "id": "$(json_escape "$ID")",
-  "device": "$(json_escape "$DEVICE")",
-  "phase": "$(json_escape "$phase")",
+  "id": $(json_escape "$ID"),
+  "device": $(json_escape "$DEVICE"),
+  "phase": $(json_escape "$phase"),
   "ok": $ok,
   "message": $(json_escape "$msg"),
-  "timestamp": "$(json_escape "$ts")"
+  "timestamp": $(json_escape "$ts")
 }
 EOF
 
@@ -277,18 +287,25 @@ estimate_eta() {
   size_bytes="$(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo 0)"
   [[ "$size_bytes" -gt 0 ]] || { echo "ETA: unknown (could not read device size)"; return 0; }
 
-  # time dd read sample
-  local start end elapsed
-  start="$(date +%s)"
-  # read sample from offset to avoid outer tracks and bridge cache effects
-  dd if="$DEVICE" of=/dev/null bs=$bs count="$sample_mib" skip=$((skip_gib*1024)) iflag=direct status=none 2>/dev/null || true
-  end="$(date +%s)"
-  elapsed=$((end - start))
-  [[ "$elapsed" -gt 0 ]] || elapsed=1
-
   local mib_per_s
-  mib_per_s=$((sample_mib / elapsed))
-  [[ "$mib_per_s" -gt 0 ]] || mib_per_s=1
+  if [[ "${PLAN:-0}" == "1" ]]; then
+    # PLAN mode: don't touch the disk (no dd sample).
+    # Use a conservative default so the user has a ballpark.
+    mib_per_s=200
+    echo "Estimated sequential read throughput: ~${mib_per_s} MiB/s (PLAN mode: assumed; no disk I/O sample)"
+  else
+    # time dd read sample
+    local start end elapsed
+    start="$(date +%s)"
+    # read sample from offset to avoid outer tracks and bridge cache effects
+    dd if="$DEVICE" of=/dev/null bs=$bs count="$sample_mib" skip=$((skip_gib*1024)) iflag=direct status=none 2>/dev/null || true
+    end="$(date +%s)"
+    elapsed=$((end - start))
+    [[ "$elapsed" -gt 0 ]] || elapsed=1
+    mib_per_s=$((sample_mib / elapsed))
+    [[ "$mib_per_s" -gt 0 ]] || mib_per_s=1
+    echo "Estimated sequential read throughput: ~${mib_per_s} MiB/s (sampled ${sample_mib} MiB)"
+  fi
 
   # full-disk pass time (seconds): size_bytes / (mib_per_s * MiB)
   local pass_s
@@ -312,7 +329,6 @@ estimate_eta() {
     total_s=0
   fi
 
-  echo "Estimated sequential read throughput: ~${mib_per_s} MiB/s (sampled ${sample_mib} MiB)"
   echo "Estimated full-disk pass time: ~${pass_s}s (~$((pass_s/3600))h)"
   if [[ "$passes" -gt 0 ]]; then
     echo "Estimated badblocks time (${BB_PATTERNS}, ${passes} passes): ~${total_s}s (~$((total_s/3600))h)"
@@ -326,12 +342,26 @@ smart_run_and_wait() {
   write_status "smart_${test}_start" "Starting SMART ${label} test"
   note "Starting SMART ${label} test: smartctl -t $test $DEVICE"
 
+  if [[ "${ABORT_SMART:-0}" == "1" ]]; then
+    note "ABORT_SMART=1: aborting any in-progress SMART self-test before starting (${label})"
+    smartctl -X "$DEVICE" >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
   # Start test and capture output so we can detect "can't start" conditions.
   local start_out
   start_out="$(smartctl -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
   if echo "$start_out" | grep -qi "Can't start self-test without aborting current test"; then
-    write_status "smart_${test}_failed" "SMART ${label} could not start (another test already running)" 0
-    die "SMART ${label} could not start because another test is running. Abort with: smartctl -X $DEVICE, then retry."
+    if [[ "${ABORT_SMART:-0}" == "1" ]]; then
+      note "A SMART test is already running; aborting and retrying start once..."
+      smartctl -X "$DEVICE" >/dev/null 2>&1 || true
+      sleep 2
+      start_out="$(smartctl -t "$test" "$DEVICE" 2>&1 | tee -a "$LOG_FILE" || true)"
+    fi
+    if echo "$start_out" | grep -qi "Can't start self-test without aborting current test"; then
+      write_status "smart_${test}_failed" "SMART ${label} could not start (another test already running)" 0
+      die "SMART ${label} could not start because another test is running. Abort with: smartctl -X $DEVICE, then retry (or add --abort-smart)."
+    fi
   fi
 
   # Poll until it finishes. For long tests we must be fail-closed: do not proceed unless completion is confirmed.
@@ -483,6 +513,15 @@ run_self_test() {
 
 run_parallel() {
   need_cmd tmux
+  if [[ "${PLAN:-0}" == "1" ]]; then
+    note "PLAN mode with --multi: not launching tmux; printing per-device plans."
+    for dev in $MULTI_DEVICES; do
+      "$0" --device "$dev" --plan --patterns "$BB_PATTERNS"
+      echo
+    done
+    return 0
+  fi
+
   local session="burnin_$(date +%s)"
   note "Launching parallel tests for: $MULTI_DEVICES"
   note "Tmux session: $session"
@@ -510,9 +549,10 @@ run_parallel() {
   local first=1
   for dev in $MULTI_DEVICES; do
     local cmd="sudo $env_str $0 --device $dev"
+    [[ "${ABORT_SMART:-0}" == "1" ]] && cmd+=" --abort-smart"
     [[ "$RUN" == "1" ]] && cmd+=" --run"
     [[ "$BB_PATTERNS" != "default" ]] && cmd+=" --patterns $BB_PATTERNS"
-    
+
     if [[ $first -eq 1 ]]; then
       tmux new-session -d -s "$session" -n "$(basename "$dev")" "$cmd; read -p 'Press enter to close window' -r"
       first=0
@@ -535,6 +575,37 @@ main() {
 
   if [[ "$SELF_TEST" == "1" ]]; then
     run_self_test
+    return 0
+  fi
+
+  if [[ "${PLAN:-0}" == "1" ]]; then
+    need_cmd lsblk
+    need_cmd blockdev
+    need_cmd awk
+    need_cmd sed
+    need_cmd grep
+    need_cmd date
+
+    if device_has_mounts; then
+      lsblk "$DEVICE" >&2 || true
+      die "Refusing: $DEVICE has mounted partitions. Unmount first."
+    fi
+
+    read -r MODEL SERIAL < <(get_model_serial)
+    ID="${MODEL}_${SERIAL}"
+    DEV_TAG="$(basename "$DEVICE")"
+
+    note "PLAN mode (no SMART tests, no badblocks)."
+    note "Device: $DEVICE"
+    note "Model/Serial: $MODEL / $SERIAL"
+    note "Would run: SMART short -> (optional conveyance) -> SMART long"
+    if is_rotational && [[ "$BADBLOCKS" == "1" ]]; then
+      note "Would run (only with --run): badblocks (${BB_PATTERNS}) + post-SMART tests"
+    else
+      note "Would skip badblocks (non-rotational or disabled)."
+    fi
+    note "ETA estimation (rough):"
+    estimate_eta
     return 0
   fi
 
@@ -569,7 +640,8 @@ main() {
   note "Log: $LOG_FILE"
   note "Status: $STATUS_DIR/$ID/status.json"
   if [[ "$RUN" != "1" ]]; then
-    note "Mode: DRY RUN (no destructive actions). Add --run to actually erase/test."
+    note "Mode: SMART-only (non-destructive). SMART tests will run; badblocks will NOT run unless you add --run."
+    note "If you want plan-only (no SMART tests), add --plan."
   else
     note "Mode: RUN (DESTRUCTIVE). Data on $DEVICE WILL be erased."
   fi
