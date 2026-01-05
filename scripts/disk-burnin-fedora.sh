@@ -100,12 +100,16 @@ parse_args() {
   fi
 
   [[ -n "$DEVICE" ]] || [[ -n "$MULTI_DEVICES" ]] || die "--device or --multi is required (or use --self-test)"
-  [[ -b "$DEVICE" ]] || die "Not a block device: $DEVICE"
-  [[ "$DEVICE" =~ ^/dev/ ]] || die "Device must be under /dev (got: $DEVICE)"
+  
+  # Only validate DEVICE if it's set (not using --multi)
+  if [[ -n "$DEVICE" ]]; then
+    [[ -b "$DEVICE" ]] || die "Not a block device: $DEVICE"
+    [[ "$DEVICE" =~ ^/dev/ ]] || die "Device must be under /dev (got: $DEVICE)"
 
-  # disallow partitions (e.g. /dev/sdb1, /dev/nvme0n1p1)
-  if [[ "$DEVICE" =~ [0-9]$ ]] || [[ "$DEVICE" =~ p[0-9]+$ ]]; then
-    die "Refusing to run on a partition. Provide the whole-disk device like /dev/sdb (got: $DEVICE)"
+    # disallow partitions (e.g. /dev/sdb1, /dev/nvme0n1p1)
+    if [[ "$DEVICE" =~ [0-9]$ ]] || [[ "$DEVICE" =~ p[0-9]+$ ]]; then
+      die "Refusing to run on a partition. Provide the whole-disk device like /dev/sdb (got: $DEVICE)"
+    fi
   fi
 
   case "$BB_PATTERNS" in
@@ -424,6 +428,17 @@ run_parallel() {
   local session="burnin_$(date +%s)"
   note "Launching parallel tests for: $MULTI_DEVICES"
   note "Tmux session: $session"
+
+  # Validate all devices first
+  for dev in $MULTI_DEVICES; do
+    [[ -n "$dev" ]] || continue
+    [[ -b "$dev" ]] || die "Not a block device: $dev"
+    [[ "$dev" =~ ^/dev/ ]] || die "Device must be under /dev (got: $dev)"
+    # disallow partitions
+    if [[ "$dev" =~ [0-9]$ ]] || [[ "$dev" =~ p[0-9]+$ ]]; then
+      die "Refusing to run on a partition. Provide the whole-disk device like /dev/sdb (got: $dev)"
+    fi
+  done
 
   # Pass all existing env vars into the script
   local env_str=""
