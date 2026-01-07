@@ -166,6 +166,47 @@ is_usb_transport() {
   [[ "$(lsblk -dn -o TRAN "$DEVICE" 2>/dev/null | head -n1 || true)" == "usb" ]]
 }
 
+resolve_device_by_serial() {
+  # If the kernel renumbers /dev/sdX (common when other USB disks are unplugged),
+  # follow the disk by its SERIAL.
+  #
+  # Returns 0 if DEVICE is usable (possibly updated), non-zero otherwise.
+  if [[ -b "$DEVICE" ]]; then
+    return 0
+  fi
+
+  [[ -n "${SERIAL:-}" ]] || return 1
+
+  local name new_dev
+  name="$(lsblk -dn -o NAME,SERIAL 2>/dev/null | awk -v s="$SERIAL" '$2==s {print $1}' | head -n1 || true)"
+  [[ -n "$name" ]] || return 1
+
+  new_dev="/dev/$name"
+  if [[ -b "$new_dev" ]]; then
+    log_note "Device node changed (serial match): $DEVICE -> $new_dev (serial $SERIAL)"
+    DEVICE="$new_dev"
+    return 0
+  fi
+
+  return 1
+}
+
+ensure_device_present() {
+  # Retry briefly to handle transient disconnects; fail closed if device stays missing.
+  local tries="${DEVICE_RETRY_TRIES:-12}"   # 12 * 5s = 60s
+  local sleep_s="${DEVICE_RETRY_SLEEP_S:-5}"
+  local i=1
+  while [[ "$i" -le "$tries" ]]; do
+    if resolve_device_by_serial; then
+      return 0
+    fi
+    log_note "WARNING: device path missing ($DEVICE). Retrying lookup by serial $SERIAL ($i/$tries)..."
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -457,6 +498,11 @@ smart_run_and_wait() {
   write_status "smart_${test}_start" "Starting SMART ${label} test"
   log_note "Starting SMART ${label} test: smartctl ${SMARTCTL_ARGS[*]} -t $test $DEVICE"
 
+  if ! ensure_device_present; then
+    write_status "smart_${test}_failed" "SMART ${label} could not start (device missing: $DEVICE)" 0
+    die "Device missing: $DEVICE (serial $SERIAL). If it was renumbered, re-run with a stable path like /dev/disk/by-id/..."
+  fi
+
   if [[ "${ABORT_SMART:-0}" == "1" ]]; then
     log_note "ABORT_SMART=1: aborting any in-progress SMART self-test before starting (${label})"
     smartctl "${SMARTCTL_ARGS[@]}" -X "$DEVICE" >/dev/null 2>&1 || true
@@ -503,6 +549,11 @@ smart_run_and_wait() {
 
   while [[ "$waited" -lt "$max_wait" ]]; do
     local status_out selftest_log test_result
+
+    if ! ensure_device_present; then
+      write_status "smart_${test}_failed" "SMART ${label} failed (device missing: $DEVICE)" 0
+      die "Device missing during SMART polling: $DEVICE (serial $SERIAL)"
+    fi
 
     status_out="$(smartctl "${SMARTCTL_ARGS[@]}" -c "$DEVICE" 2>/dev/null | tr -d '\r' || true)"
     [[ -n "$status_out" ]] && echo "$status_out" >>"$LOG_FILE"
