@@ -245,9 +245,13 @@ parse_args() {
     [[ -b "$DEVICE" ]] || die "Not a block device: $DEVICE"
     [[ "$DEVICE" =~ ^/dev/ ]] || die "Device must be under /dev (got: $DEVICE)"
 
-    # disallow partitions (e.g. /dev/sdb1, /dev/nvme0n1p1)
-    if [[ "$DEVICE" =~ [0-9]$ ]] || [[ "$DEVICE" =~ p[0-9]+$ ]]; then
-      die "Refusing to run on a partition. Provide the whole-disk device like /dev/sdb (got: $DEVICE)"
+    # Disallow partitions by asking the kernel, NOT by parsing the path string.
+    # (Stable symlinks like /dev/disk/by-id/* often end with digits due to serial numbers.)
+    local dev_real dev_type
+    dev_real="$(readlink -f -- "$DEVICE" 2>/dev/null || echo "$DEVICE")"
+    dev_type="$(lsblk -dn -o TYPE "$dev_real" 2>/dev/null | head -n1 || true)"
+    if [[ "$dev_type" == "part" ]]; then
+      die "Refusing to run on a partition. Provide the whole-disk device (got: $DEVICE -> $dev_real)"
     fi
   fi
 
@@ -707,9 +711,12 @@ run_parallel() {
     [[ -n "$dev" ]] || continue
     [[ -b "$dev" ]] || die "Not a block device: $dev"
     [[ "$dev" =~ ^/dev/ ]] || die "Device must be under /dev (got: $dev)"
-    # disallow partitions
-    if [[ "$dev" =~ [0-9]$ ]] || [[ "$dev" =~ p[0-9]+$ ]]; then
-      die "Refusing to run on a partition. Provide the whole-disk device like /dev/sdb (got: $dev)"
+    # disallow partitions (kernel-based, not string-based)
+    local dev_real dev_type
+    dev_real="$(readlink -f -- "$dev" 2>/dev/null || echo "$dev")"
+    dev_type="$(lsblk -dn -o TYPE "$dev_real" 2>/dev/null | head -n1 || true)"
+    if [[ "$dev_type" == "part" ]]; then
+      die "Refusing to run on a partition. Provide the whole-disk device (got: $dev -> $dev_real)"
     fi
   done
 
