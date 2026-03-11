@@ -94,9 +94,10 @@ See `./scripts/disk-burnin-fedora.sh --help` for full usage.
 This script draws on ideas and patterns from existing open-source disk burn-in and testing projects:
 
 - **[Spearfoot/disk-burnin-and-testing](https://github.com/Spearfoot/disk-burnin-and-testing)** — POSIX shell script: SMART short → badblocks → SMART extended; dry-run by default; widely used reference.
+- **[dak180/disk-burnin-and-testing](https://github.com/dak180/disk-burnin-and-testing)** — Bash burn-in script (including [topic/burnin](https://github.com/dak180/disk-burnin-and-testing/blob/topic/burnin/README.md)): SMART short → conveyance → extended → badblocks → SMART again; inspired by TrueNAS community burn-in testing; dry-run by default, tmux for multiple drives.
+- **[ezonakiusagi/bht](https://github.com/ezonakiusagi/bht)** — Bulk HDD testing with badblocks: launches multiple badblocks instances, status checks, optional email notifications when tests complete.
 - **[zaggynl/hddtest](https://github.com/zaggynl/hddtest)** — Linux HDD torture test (SMART + destructive badblocks), FreeNAS-style.
 - **[jasontbradshaw – Hard Drive burn-in script (Gist)](https://gist.github.com/jasontbradshaw/3ca8abeee59a961b5b8a)** — Burn-in for new drives and pre–full-disk encryption.
-- **[ezonakiusagi/bht](https://github.com/ezonakiusagi/bht)** — Bulk HDD testing with badblocks and notifications.
 
 The flow (SMART → badblocks → SMART) and use of `badblocks -wsv` follow common practice from these projects; this version adds Fedora/Linux defaults, USB-dock considerations, optional git status push, and tmux-based parallel runs.
 
