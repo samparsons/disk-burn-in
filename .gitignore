@@ -1,5 +1,12 @@
+# burn-in outputs (kept out of repo)
 run-logs/
 run-status/
 status/
+burnin-logs/
+burnin-status/
 *.log
 *.bb
+
+# local editor/OS
+.DS_Store
+*.swp
